@@ -1,0 +1,29 @@
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# PyTorch / training artifacts
+checkpoints/
+*.pt
+*.pth
+logs/
+*.log
+
+# Data and generated outputs
+*.npy
+*.npz
+*.csv
+outputs/
+
+# IDE/editor settings
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
