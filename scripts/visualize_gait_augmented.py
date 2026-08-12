@@ -9,12 +9,17 @@ the walking motion remains visible. Each sample produces four GIFs:
 - spatial_asymmetry
 - postural_shift
 
+Since gait is cyclic, only a handful of steps near the start of the sequence
+are rendered (see `--steps`) instead of the full walk, which keeps the camera
+zoomed in on the skeleton instead of the whole traversed distance.
+
 Use `--all-split` to render every sample in a split.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 from typing import Callable, Iterable
@@ -25,6 +30,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 import numpy as np
+from scipy.signal import find_peaks
 import torch
 
 
@@ -79,6 +85,16 @@ VIEW_AXES = {
 
 POSE_OFFSET = 2
 BODY_JOINTS = slice(POSE_OFFSET, None)
+
+SOURCE_FPS = 20.0  # dataset/description.md: "Frames are recorded with 20Hz"
+DEFAULT_STEPS_TO_SHOW = 4
+STEP_BOUNDARY_MIN_FRAME_GAP = 5
+FALLBACK_STEP_DURATION_S = 0.55
+
+FIGURE_SIZE = (6.8, 8.6)
+CANVAS_AREA_SQIN = FIGURE_SIZE[0] * FIGURE_SIZE[1]
+MIN_FIGURE_ASPECT = 0.45  # x/y bounds so a near-flat or near-vertical clip doesn't produce a sliver figure
+MAX_FIGURE_ASPECT = 1.8
 
 
 def load_motion(sample_id: str) -> np.ndarray:
@@ -138,6 +154,36 @@ def copy_normalized(normalized: np.ndarray) -> np.ndarray:
 
 def pose_view(normalized: np.ndarray) -> np.ndarray:
     return normalized[:, BODY_JOINTS, :]
+
+
+def detect_step_boundaries(normalized: np.ndarray) -> np.ndarray:
+    """Frame indices where the feet cross underneath the body, i.e. one boundary per step.
+
+    Mirrors the (unused) step-detection in dataset/attribute_computation.py, but
+    scales the height threshold to the sample's own foot-distance range instead
+    of a fixed value, since it runs on the human-centered pose here rather than
+    the raw joint data that script was tuned against.
+    """
+    pose = pose_view(normalized)
+    foot_distance = np.abs(pose[:, 10, 2] - pose[:, 11, 2])  # TOES_RIGHT vs TOES_LEFT, forward axis
+    threshold = max(float(foot_distance.max()) * 0.25, 1e-3)
+    peaks, _ = find_peaks(-foot_distance, distance=STEP_BOUNDARY_MIN_FRAME_GAP, height=-threshold)
+    return peaks
+
+
+def select_step_window(motion: np.ndarray, num_steps: int) -> tuple[int, int]:
+    """Pick a [start, end) frame range covering `num_steps` steps near the start of the sequence."""
+    normalized, _, _ = normalize_motion(motion)
+    boundaries = detect_step_boundaries(normalized)
+
+    if len(boundaries) > num_steps:
+        start, end = int(boundaries[0]), int(boundaries[num_steps])
+        return start, min(end + 1, motion.shape[0])
+
+    # Too few clean footfalls detected (short or noisy sample) - fall back to a
+    # fixed-duration window sized for the requested step count.
+    fallback_frames = int(round(num_steps * FALLBACK_STEP_DURATION_S * SOURCE_FPS))
+    return 0, min(fallback_frames, motion.shape[0])
 
 
 def scale_chain(pose: np.ndarray, parent: int, chain: list[int], factors: tuple[float, float, float]) -> None:
@@ -245,18 +291,31 @@ def project_pose(pose: np.ndarray, view: str) -> np.ndarray:
 
 
 def compute_limits(projected_frames: np.ndarray, zoom: float) -> tuple[float, float, float, float]:
+    # zoom scales the natural bounding box directly (no forced square), so keep it
+    # >= 1.0 - the figure is sized to this box's own aspect ratio via
+    # figure_size_for_limits, so there's no slack dimension left to absorb a crop.
     flat = projected_frames.reshape(-1, 2)
     mins = flat.min(axis=0)
     maxs = flat.max(axis=0)
     center = (mins + maxs) / 2.0
-    half_range = ((maxs - mins).max() / 2.0) * zoom
-    half_range = max(float(half_range), 1e-3)
+    half_x = max(float(maxs[0] - mins[0]) / 2.0, 1e-3) * zoom
+    half_y = max(float(maxs[1] - mins[1]) / 2.0, 1e-3) * zoom
     return (
-        float(center[0] - half_range),
-        float(center[0] + half_range),
-        float(center[1] - half_range),
-        float(center[1] + half_range),
+        float(center[0] - half_x),
+        float(center[0] + half_x),
+        float(center[1] - half_y),
+        float(center[1] + half_y),
     )
+
+
+def figure_size_for_limits(x_min: float, x_max: float, y_min: float, y_max: float) -> tuple[float, float]:
+    """Size the figure to match this clip's own data aspect ratio (clamped) so the
+    skeleton fills the canvas instead of being letterboxed inside a fixed shape."""
+    aspect = (x_max - x_min) / max(y_max - y_min, 1e-6)
+    aspect = min(max(aspect, MIN_FIGURE_ASPECT), MAX_FIGURE_ASPECT)
+    height = math.sqrt(CANVAS_AREA_SQIN / aspect)
+    width = CANVAS_AREA_SQIN / height
+    return width, height
 
 
 def style_axes(ax, view: str, x_min: float, x_max: float, y_min: float, y_max: float) -> None:
@@ -274,10 +333,10 @@ def style_axes(ax, view: str, x_min: float, x_max: float, y_min: float, y_max: f
     ax.set_title(f"Gait movement - {view} view", fontsize=14, pad=14)
 
 
-def render_gif(projected_frames: np.ndarray, output_path: Path, fps: int, view: str, title: str, zoom: float = 0.85) -> None:
+def render_gif(projected_frames: np.ndarray, output_path: Path, fps: int, view: str, title: str, zoom: float = 1.06) -> None:
     x_min, x_max, y_min, y_max = compute_limits(projected_frames, zoom=zoom)
 
-    fig, ax = plt.subplots(figsize=(6.8, 8.6))
+    fig, ax = plt.subplots(figsize=figure_size_for_limits(x_min, x_max, y_min, y_max))
     style_axes(ax, view, x_min, x_max, y_min, y_max)
 
     bone_lines = []
@@ -332,12 +391,13 @@ def render_gif(projected_frames: np.ndarray, output_path: Path, fps: int, view: 
     plt.close(fig)
 
 
-def render_frames(projected_frames: np.ndarray, output_dir: Path, view: str, title: str, zoom: float = 0.85) -> None:
+def render_frames(projected_frames: np.ndarray, output_dir: Path, view: str, title: str, zoom: float = 1.06) -> None:
     x_min, x_max, y_min, y_max = compute_limits(projected_frames, zoom=zoom)
     output_dir.mkdir(parents=True, exist_ok=True)
+    figsize = figure_size_for_limits(x_min, x_max, y_min, y_max)
 
     for frame_index, skeleton in enumerate(projected_frames):
-        fig, ax = plt.subplots(figsize=(6.8, 8.6))
+        fig, ax = plt.subplots(figsize=figsize)
         style_axes(ax, view, x_min, x_max, y_min, y_max)
 
         xs = skeleton[:, 0]
@@ -378,9 +438,14 @@ def save_variants_for_sample(
     stride: int,
     view: str,
     frames_only: bool,
+    num_steps: int,
 ) -> None:
     motion = load_motion(sample_id)
     print(f"Loaded sample {sample_id} with shape {motion.shape}")
+
+    start, end = select_step_window(motion, num_steps)
+    motion = motion[start:end]
+    print(f"Showing frames {start}:{end} (~{num_steps} steps) for sample {sample_id}")
 
     sample_dir = output_dir / sample_id
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -407,14 +472,15 @@ def main() -> None:
     parser.add_argument("--stride", type=int, default=2, help="Keep every n-th frame to make motion easier to see")
     parser.add_argument("--view", type=str, default="side", choices=sorted(VIEW_AXES), help="Projection view for the skeleton")
     parser.add_argument("--frames-only", action="store_true", help="Save PNG frames instead of GIFs")
+    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS_TO_SHOW, help="Number of gait steps to render near the start of the sequence (gait is cyclic, so 3-5 is usually enough)")
     args = parser.parse_args()
 
     if args.all_split:
         for sample_id in get_sample_ids(args.split):
-            save_variants_for_sample(sample_id, args.output_dir, args.fps, args.stride, args.view, args.frames_only)
+            save_variants_for_sample(sample_id, args.output_dir, args.fps, args.stride, args.view, args.frames_only, args.steps)
     else:
         sample_id = get_sample_id(args.index, args.sample_id, args.split)
-        save_variants_for_sample(sample_id, args.output_dir, args.fps, args.stride, args.view, args.frames_only)
+        save_variants_for_sample(sample_id, args.output_dir, args.fps, args.stride, args.view, args.frames_only, args.steps)
 
 
 if __name__ == "__main__":

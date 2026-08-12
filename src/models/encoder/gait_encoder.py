@@ -44,10 +44,12 @@ class GaitEncoder(nn.Module):
         input_channels: int = 3,
         latent_dim: int = 256,
         base_channels: int = 64,
+        hidden_time_steps: int = 8,
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
         self.latent_dim = latent_dim
+        self.hidden_time_steps = hidden_time_steps
 
         self.backbone = nn.Sequential(
             ConvBlock(input_channels, base_channels, dropout=dropout),
@@ -58,12 +60,18 @@ class GaitEncoder(nn.Module):
             nn.MaxPool2d(kernel_size=2, stride=2),
             ConvBlock(base_channels * 2, base_channels * 4, dropout=dropout),
             ConvBlock(base_channels * 4, base_channels * 4, dropout=dropout),
-            nn.AdaptiveAvgPool2d((1, 1)),
+            # Pool out the joints axis only. Pooling time down to (1, 1) made the
+            # latent nearly invariant to frame order (a shuffled or frozen window
+            # encoded almost identically to the real one), so the decoder had no
+            # way to reconstruct motion - only an average pose. Keeping a real
+            # (compressed) time axis here and flattening it into the projection
+            # below preserves per-frame ordering in the latent.
+            nn.AdaptiveAvgPool2d((hidden_time_steps, 1)),
         )
 
         self.projection = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(base_channels * 4, latent_dim),
+            nn.Linear(base_channels * 4 * hidden_time_steps, latent_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
