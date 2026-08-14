@@ -1,3 +1,9 @@
+# torch is intentionally not pinned here - it's hardware/CUDA-specific.
+# Install it separately, matching the target machine's GPU and CUDA version
+# (see https://pytorch.org/get-started/locally/), before installing the rest
+# of this file. On a machine that already has a working CUDA install (e.g.
+# one that's trained successfully before), reuse that environment rather
+# than letting this file's pins touch it.
 contourpy==1.3.0
 cycler==0.12.1
 filelock==3.19.1
@@ -20,7 +26,6 @@ pytz==2026.3.post1
 scipy==1.13.1
 six==1.17.0
 sympy==1.14.0
-torch==2.8.0
 tqdm==4.70.0
 typing_extensions==4.16.0
 tzdata==2026.3

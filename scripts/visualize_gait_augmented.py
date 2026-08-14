@@ -90,6 +90,7 @@ SOURCE_FPS = 20.0  # dataset/description.md: "Frames are recorded with 20Hz"
 DEFAULT_STEPS_TO_SHOW = 4
 STEP_BOUNDARY_MIN_FRAME_GAP = 5
 FALLBACK_STEP_DURATION_S = 0.55
+MIN_STEP_PROGRESS_M = 0.12  # minimum net forward displacement expected per real step
 
 FIGURE_SIZE = (6.8, 8.6)
 CANVAS_AREA_SQIN = FIGURE_SIZE[0] * FIGURE_SIZE[1]
@@ -172,11 +173,24 @@ def detect_step_boundaries(normalized: np.ndarray) -> np.ndarray:
 
 
 def select_step_window(motion: np.ndarray, num_steps: int) -> tuple[int, int]:
-    """Pick a [start, end) frame range covering `num_steps` steps near the start of the sequence."""
+    """Pick a [start, end) frame range covering `num_steps` steps of real forward
+    walking near the start of the sequence."""
     normalized, _, _ = normalize_motion(motion)
     boundaries = detect_step_boundaries(normalized)
 
     if len(boundaries) > num_steps:
+        min_progress = MIN_STEP_PROGRESS_M * num_steps
+        # Some recordings open with a settling/weight-shift period before real
+        # forward walking begins, which still registers as foot-crossing "steps"
+        # here - skip past those by requiring genuine net pelvis displacement
+        # (in raw/world coordinates) across the candidate window.
+        for i in range(len(boundaries) - num_steps):
+            b_start, b_end = boundaries[i], boundaries[i + num_steps]
+            progress = float(np.linalg.norm(motion[b_end, 0, :] - motion[b_start, 0, :]))
+            if progress >= min_progress:
+                return int(b_start), min(int(b_end) + 1, motion.shape[0])
+
+        # Nothing met the progress bar - fall back to the first detected window anyway.
         start, end = int(boundaries[0]), int(boundaries[num_steps])
         return start, min(end + 1, motion.shape[0])
 

@@ -1,8 +1,9 @@
 """Decoder for gait sequence windows.
 
 This module maps a latent vector back to a skeleton window shaped
-[batch, time, joints, channels]. It is designed to mirror the encoder used
-for the gait dataset.
+[batch, time, joints, channels]. It mirrors the encoder: joints are treated
+as a feature/channel dimension throughout, never a spatial axis, so only the
+time axis is convolved over and upsampled.
 """
 
 from __future__ import annotations
@@ -12,16 +13,16 @@ from torch import nn
 from torch.nn import functional as F
 
 
-class ConvBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, dropout: float = 0.0):
+class ConvBlock1d(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3, dropout: float = 0.0):
         super().__init__()
         layers = [
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
+            nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2, bias=False),
+            nn.BatchNorm1d(out_channels),
             nn.ReLU(inplace=True),
         ]
         if dropout > 0:
-            layers.append(nn.Dropout2d(dropout))
+            layers.append(nn.Dropout1d(dropout))
         self.block = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -42,11 +43,10 @@ class GaitDecoder(nn.Module):
         self,
         latent_dim: int = 256,
         output_time_steps: int = 30,
-        output_joints: int = 22,
+        output_joints: int = 24,
         output_channels: int = 3,
-        base_channels: int = 64,
+        base_channels: int = 128,
         hidden_time_steps: int = 8,
-        hidden_joints: int = 6,
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
@@ -54,19 +54,19 @@ class GaitDecoder(nn.Module):
         self.output_joints = output_joints
         self.output_channels = output_channels
         self.hidden_time_steps = hidden_time_steps
-        self.hidden_joints = hidden_joints
 
-        hidden_channels = base_channels * 4
+        hidden_channels = base_channels * 2  # matches the encoder's final width
+
         self.project = nn.Sequential(
-            nn.Linear(latent_dim, hidden_channels * hidden_time_steps * hidden_joints),
+            nn.Linear(latent_dim, hidden_channels * hidden_time_steps),
             nn.ReLU(inplace=True),
         )
 
         self.decoder = nn.Sequential(
-            ConvBlock(hidden_channels, hidden_channels, dropout=dropout),
-            ConvBlock(hidden_channels, hidden_channels // 2, dropout=dropout),
-            ConvBlock(hidden_channels // 2, hidden_channels // 4, dropout=dropout),
-            nn.Conv2d(hidden_channels // 4, output_channels, kernel_size=1),
+            ConvBlock1d(hidden_channels, hidden_channels, dropout=dropout),
+            ConvBlock1d(hidden_channels, base_channels, dropout=dropout),
+            ConvBlock1d(base_channels, base_channels, dropout=dropout),
+            nn.Conv1d(base_channels, output_joints * output_channels, kernel_size=1),
         )
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
@@ -75,13 +75,9 @@ class GaitDecoder(nn.Module):
 
         batch_size = latent.shape[0]
         hidden = self.project(latent)
-        hidden = hidden.view(batch_size, -1, self.hidden_time_steps, self.hidden_joints)
-        hidden = F.interpolate(
-            hidden,
-            size=(self.output_time_steps, self.output_joints),
-            mode="bilinear",
-            align_corners=False,
-        )
-        output = self.decoder(hidden)
-        output = output.permute(0, 2, 3, 1).contiguous()
+        hidden = hidden.view(batch_size, -1, self.hidden_time_steps)  # [B, hidden_channels, hidden_time_steps]
+        hidden = F.interpolate(hidden, size=self.output_time_steps, mode="linear", align_corners=False)
+        output = self.decoder(hidden)  # [B, J*C, T]
+        output = output.permute(0, 2, 1).contiguous()  # [B, T, J*C]
+        output = output.view(batch_size, self.output_time_steps, self.output_joints, self.output_channels)
         return output

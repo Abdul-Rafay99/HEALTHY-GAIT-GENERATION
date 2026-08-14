@@ -68,7 +68,7 @@ class TrainConfig:
     lr_scheduler_min_lr: float = 1e-6
     epochs: int = 200
     device: str = field(default_factory=lambda: os.getenv("TRAIN_DEVICE", resolve_default_device()))
-    use_normalized_input: bool = False
+    use_normalized_input: bool = True
     checkpoint_dir: Path = PROJECT_ROOT / "checkpoints"
     history_file: Path = PROJECT_ROOT / "logs" / "training_history.csv"
     amp: bool = True
@@ -237,7 +237,11 @@ def fit(config: TrainConfig) -> Dict[str, float]:
     val_loader = build_dataloader(config.val_split, config, shuffle=False)
 
     output_joints = 24 if config.use_normalized_input else 22
-    encoder = GaitEncoder(input_channels=config.input_channels, latent_dim=config.latent_dim).to(device)
+    encoder = GaitEncoder(
+        input_joints=output_joints,
+        input_channels=config.input_channels,
+        latent_dim=config.latent_dim,
+    ).to(device)
     decoder = GaitDecoder(
         latent_dim=config.latent_dim,
         output_time_steps=config.output_time_steps,
